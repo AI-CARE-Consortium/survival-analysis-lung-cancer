@@ -40,9 +40,10 @@ cox:
     - efron
 deep_surv:
   batch_size: 
+    - 512
+    - 1024
     - 1770
     - 3540
-    - 7080
   inner_dim:
     - 8
     - 16
