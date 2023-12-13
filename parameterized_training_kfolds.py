@@ -14,8 +14,7 @@ import yaml
 from data_loading import import_vonko
 from data_preprocessing import (calculate_survival_time,
                                 encode_selected_variables)
-from evaluation import PartialLogLikelihood
-# import wandb_training
+from evaluation import PartialLogLikelihood, PartialMSE
 from sklearn.experimental import enable_iterative_imputer  # noqa
 from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 from sklearn.model_selection import KFold, train_test_split
@@ -26,6 +25,7 @@ from sksurv.util import Surv
 from training_survival_analysis import train_model
 from data_preprocessing import tumorDataset
 from pytorch_tabnet.tab_model import TabNetRegressor
+from models import TabNetSurvivalRegressor
 import argparse
 import logging
 
@@ -36,12 +36,19 @@ if __name__ == "__main__":
     parser.add_argument("--deep_surv_model", type=str, default="none", help="If model is deep_surv, which specific deep_surv model to use")
     parser.add_argument("--tnm", action="store_true", help="Use TNM instead of UICC")
     parser.add_argument("--one-hot", action="store_true", help="Use one-hot encoding instead of label encoding")
+    parser.add_argument("--loss", type=str, default="pll", help="Which loss function to use for Tabnet and Deep_Surv")
     args = parser.parse_args()
     model = args.model
     if model not in ["rsf", "cox", "deep_surv", "tabnet"]:
         raise ValueError("Model not implemented")
     if args.imputation_method not in ["none", "KNNImputer", "SimpleImputer", "MissForest"]:
         raise ValueError("Imputation method not implemented")
+    if args.loss == "pll":
+        loss_fn = PartialLogLikelihood
+    elif args.loss == "mse":
+        loss_fn = PartialMSE
+    else:
+        raise ValueError("Loss function not implemented")
     
     imputation_features = ["geschl", "alter", "uicc", "histo_gr", "vit_status", "survival_time"]
     selected_features = ["geschl", "alter", "histo_gr", "uicc"]  
@@ -61,19 +68,26 @@ if __name__ == "__main__":
     #If folder does not exist, create it
     if model == "deep_surv":
         dsmodel = args.deep_surv_model
-        if dsmodel not in ["feat2pdf", "minimalistic_network", "embed_net"]:
+        if dsmodel not in ["minimalistic_network"]:
             raise ValueError("DeepSurv model not implemented")
     Path(f"{base_path}/results/{study_name}").mkdir(parents=True, exist_ok=True)
     #Set up logging
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
+    log_path = f"{base_path}/results/{study_name}/log_study_{model}"
     
-    if model=="deep_surv":    
-        logger.addHandler(logging.FileHandler(f"{base_path}/results/{study_name}/log_study_{model}_{dsmodel}.txt", mode="w"))
+    if model=="deep_surv":
+        log_path += f"_{dsmodel}_{args.loss}.txt"    
+        
+    elif model=="tabnet":
+        log_path += f"_{args.loss}.txt"
+
     else:
-        logger.addHandler(logging.FileHandler(f"{base_path}/results/{study_name}/log_study_{model}.txt", mode="w"))
+        log_path += ".txt"
 
-
+    logger.addHandler(logging.FileHandler(log_path, mode="w"))
+    optuna.logging.enable_propagation()  # Propagate logs to the root logger.
+    optuna.logging.disable_default_handler()  # Stop showing logs in sys.stderr.
     
 
     random_state = 42
@@ -91,8 +105,6 @@ if __name__ == "__main__":
 
     X = calculate_survival_time(X)
     X, encoder = encode_selected_variables(X, imputation_features, na_sentinel=True)
-    # X = X.replace(-1, np.nan, inplace=False)
-    # X = X.dropna(axis=0, how="any", subset=selected_features)
 
     y = pd.DataFrame({'vit_status': X['vit_status'].astype(bool),
                     'survival_time': X['survival_time']})
@@ -102,8 +114,8 @@ if __name__ == "__main__":
     X = X[imputation_features].copy()
     logger.info(f"Length before Imputation: {len(X)}")
     logger.info(f"Imputation Method: {args.imputation_method}")
-    optuna.logging.enable_propagation()  # Propagate logs to the root logger.
-    optuna.logging.disable_default_handler()  # Stop showing logs in sys.stderr.
+    
+    
     if args.imputation_method == "none":
         # for each column in selected_features, replace -1 with number of categories + 1
         X = X[selected_features]
@@ -260,40 +272,40 @@ if __name__ == "__main__":
         }  
         scores= []
         for foldnr, (train_fold, _) in enumerate(kfold.split(X_train, y_train)):
-            y_train_numpy = np.expand_dims(y_train["vit_status"][train_fold],1) # np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1)
+            y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) #np.expand_dims(y_train["vit_status"][train_fold],1) # 
             cat_dims = [len(pd.unique(X_train[feature])) for feature in selected_features if feature != "alter"]
             
             cat_idxs = [0,2,3]
             if subset == "tnm":
                 cat_idxs = [0,2,3,4,5]
-            tabnet = TabNetRegressor(seed=random_state, device_name=config["device"], 
+            tabnet = TabNetSurvivalRegressor(seed=random_state, device_name=config["device"], 
                                      n_a=params["n_d"], cat_idxs=cat_idxs, 
                                      cat_dims=cat_dims, **params)
             tabnet.fit(
                 X_train.iloc[train_fold].values, y_train_numpy,
-                loss_fn=PartialLogLikelihood,
+                loss_fn=loss_fn,
                 max_epochs=50
             )
             
             with torch.no_grad():
                 y_pred = tabnet.predict(X_test.values)
-                eps = np.random.uniform(low=0.0, high=1e-7, size=y_pred.shape)
-                y_pred = y_pred + eps
+                
+                y_pred = y_pred + np.random.random(y_pred.shape) * 1e-7
+                print(y_pred.shape)
                 scores.append(concordance_index_censored(y_test["vit_status"], y_test["survival_time"], np.squeeze(y_pred))[0])
         trial_nr = trial.number
         logger.info(f"Trial {trial_nr}: {scores}")
         score = np.mean(scores)
         return score
         
-        preds = clf.predict(X_test)
 
 
-
+    # Create Study with objective "Maximize C-Index"
     study = optuna.create_study(study_name=study_name+"_"+model+str(datetime.datetime.now()),
                                 storage=study_db,
                                 direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=random_state)
-                                ) # directions=["maximize", "minimize", "maximize"]
+                                ) 
     if model == "rsf":
         study.optimize(objective_rsf, n_trials=50, n_jobs=2)
     elif model == "cox":
@@ -303,9 +315,10 @@ if __name__ == "__main__":
             "device": config["device"],
             "model": dsmodel,
             "epochs": 300,
-            "input_dim": len(X.columns)
+            "input_dim": len(X.columns),
+            "loss_fn" : loss_fn
         }
-        study.optimize(lambda trial: objective_deep_surv(trial, stable_params), n_trials=50, n_jobs=1)
+        study.optimize(lambda trial: objective_deep_surv(trial, stable_params), n_trials=50, n_jobs=2)
     elif model == "tabnet":
         study.optimize(objective_tabnet, n_trials=50, n_jobs=4)
 
@@ -331,8 +344,6 @@ if __name__ == "__main__":
             best_model, losses, test_eval = train_model(dataset_train, {**stable_params, **best_params})
             best_model.eval()
             y_pred = best_model(torch.Tensor(X_train.iloc[test_fold].values).to(stable_params["device"])).detach().cpu().numpy()
-            # eps = np.random.uniform(low=0.0, high=1e-7, size=y_pred.shape)
-            # y_pred = y_pred + eps
             scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
                                                         y_train[test_fold])
         elif model == "tabnet":
@@ -345,30 +356,23 @@ if __name__ == "__main__":
             best_params_subset.pop("lr")
             best_params_subset.pop("weight_decay")
             cat_dims = [len(pd.unique(X_train[feature])) for feature in selected_features if feature != "alter"]
-            # if args.imputation_method == "none":
-            #     #So missings are an extra category
-            #     cat_dims = [2,2,5]
-            #     if subset == "tnm":
-            #         cat_dims = [2,2,6,5,3]
-            # else:
-            #     cat_dims = [2,2,4]
-            #     if subset == "tnm":
-            #         cat_dims = [2,2,5,4,2]
+
             cat_idxs = [0,2,3]
             if subset == "tnm":
                 cat_idxs = [0,2,3,4,5]
-            best_model = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, seed=random_state,
+            best_model = TabNetSurvivalRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, seed=random_state,
                                          device_name=config["device"], 
                                          n_a=best_params["n_d"], **best_params_subset)
-            y_train_numpy = np.expand_dims(y_train["vit_status"][train_fold],1) # np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1)
+            y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) #np.expand_dims(y_train["vit_status"][train_fold],1) 
             best_model.fit(
                 X_train.iloc[train_fold].values, y_train_numpy,
-                loss_fn=PartialLogLikelihood
+                loss_fn=loss_fn
             )
             scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
                                                         y_train[test_fold])
-        Path(f"{base_path}/results/{study_name}/parameters_study_{model}.yaml").write_text(yaml.dump(best_params))
-
-        
         logger.info(f"Fold {i}:")
         logger.info(scores)
+        Path(f"{base_path}/results/{study_name}/parameters_study_{model}_{args.loss}.yaml").write_text(yaml.dump(best_params))
+
+        
+        

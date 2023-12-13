@@ -4,6 +4,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sksurv.ensemble import RandomSurvivalForest
 from sksurv.linear_model import CoxPHSurvivalAnalysis
+from models import TabNetSurvivalRegressor, MinimalisticNetwork
 import torch
 
 
@@ -15,18 +16,21 @@ class SHAP():
             self.shap_values = self.explainer(X_test)
             self.shap_values = self.shap_values[:, :, 1]
             self.data = X_test
-        elif type(model) is RandomSurvivalForest or type(model) is CoxPHSurvivalAnalysis:
+        elif type(model) is RandomSurvivalForest or type(model) is CoxPHSurvivalAnalysis or type(model) is TabNetSurvivalRegressor or type(model) is MinimalisticNetwork:
             self.model = "rsf"
             background = shap.maskers.Independent(X_test)
             self.explainer = shap.Explainer(model=model.predict, masker=background)  # data=X_test is sometimes needed
             self.shap_values = self.explainer(X_test)
             self.data = X_test
+
         elif isinstance(model, torch.nn.Module):
             self.model = "pytorch"
-            self.explainer = shap.DeepExplainer(model=model, data=X_test)
+            self.data = torch.tensor(X_test.values, dtype=torch.float32)
+            print(self.data.shape)
+            self.explainer = shap.DeepExplainer(model=model, data=self.data)
             self.explainer.feature_names = feature_names
-            self.shap_values = self.explainer.shap_values(X_test)
-            self.data = X_test
+            self.shap_values = self.explainer.shap_values(self.data)
+            
     
     def plot_violin(self):
         return shap.summary_plot(shap_values=self.shap_values, plot_type="violin", show=False)

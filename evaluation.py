@@ -3,9 +3,11 @@ from sksurv.metrics import concordance_index_censored, concordance_index_ipcw, b
 import numpy as np
 from typing import Dict
 import torch
+import torch.nn
 from scipy.stats import norm
 from sksurv.nonparametric import kaplan_meier_estimator
 from pytorch_tabnet.tab_model import TabNetRegressor
+from pytorch_tabnet.abstract_model import TabModel
 
 
 def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
@@ -28,11 +30,11 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
           
     else:
         y_pred = np.squeeze(model.predict(X_test))
-        c_index = concordance_index_censored(y_test_numpy['vit_status'], y_test_numpy['survival_time'], y_pred)[0]
+    c_index = concordance_index_censored(y_test_numpy['vit_status'], y_test_numpy['survival_time'], y_pred)[0]
    
     auc, mean_auc = cumulative_dynamic_auc(y_train_numpy, y_test_numpy, y_pred, times=times)
 
-    if isinstance(model, torch.nn.Module) or isinstance(model, TabNetRegressor):
+    if isinstance(model, torch.nn.Module) or isinstance(model, TabNetRegressor) or isinstance(model, TabModel):
         # These models do not return a survival function, so we have to calculate it ourselves
         baseline_hazard_times, baseline_hazard = kaplan_meier_estimator(y_test_numpy["vit_status"], y_test_numpy["survival_time"])
         print(np.mean(y_pred))
@@ -61,16 +63,59 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
 
 
 
+def onePair(x0, x1):
+    c = np.log(2.)
+    m = torch.nn.LogSigmoid() 
+    return 1 + m(x1-x0) / c
+  
+def rank_loss(logits, times, fail_indicator):
+    N = logits.size(0)
+    allPairs = onePair(logits.view(N,1), logits.view(1,N))
+
+    temp0 = times.view(1, N) - times.view(N, 1)
+    # indices based on times time
+    temp1 = temp0>0
+    # indices of event-event or event-censor pair
+    temp2 = fail_indicator.view(1, N) + fail_indicator.view(N, 1)
+    temp3 = temp2>0
+    # indices of events
+    temp4 = fail_indicator.view(N, 1) * torch.ones(1, N, device = logits.device)
+    # selected indices
+    final_ind = temp1 * temp3 * temp4
+    out = allPairs * final_ind
+    return out.sum() / final_ind.sum()
+
+# Convert survival time to risk score
+def survival_time_to_risk_score(survival_time, max_time=2106):
+    return 1 - survival_time / max_time
+
+def PartialMSE(logits, fail_indicator, times=None):
+    '''
+    Implementation of a partial MSE loss function
+    '''
+    # risks = survival_time_to_risk_score(times)
+    loss = torch.nn.MSELoss(reduction='none')
+    logits = torch.squeeze(logits)
+    mse = torch.mean(fail_indicator * loss(logits, times))
+    penalty = torch.mean((logits < times) * (1-fail_indicator) * loss(logits, times))
+    return mse + penalty - rank_loss(logits, times, fail_indicator) 
+
+
+
+
 
 
 def PartialLogLikelihood(logits, fail_indicator, times=None, ties="noties"):
     '''
-    Implementation of partial log-likelihood loss function from https://github.com/runopti/stg/blob/master/python/stg/losses.py
+    Implementation of partial log-likelihood loss function
     fail_indicator: 1 if the sample fails, 0 if the sample is censored.
     logits: raw output from model 
-    ties: 'noties' or 'efron' or 'breslow'
+    ties: 'noties'
     '''
     logL = 0
+    
+    logits = logits.squeeze()
+    
     # get time order for prediction and fails
     if times is None:
         times = torch.arange(logits.shape[0]).to(logits.device)
@@ -84,21 +129,8 @@ def PartialLogLikelihood(logits, fail_indicator, times=None, ties="noties"):
         likelihood = logits - log_risk
         # dimension for E: np.array -> [None, 1]
         uncensored_likelihood = likelihood * fail_indicator
-        logL = -torch.sum(uncensored_likelihood)
-    elif ties == "breslow":
-    # calculate the log-likelihood with Breslow approximation
-        for t in torch.unique(times):
-            ix = (times == t).nonzero().squeeze()
-            if ix.numel() > 1:
-                # compute the gradient at each event time using Breslow approximation
-                h = torch.exp(logits[ix])
-                cumsum_hazard_ratio = torch.cumsum(h, dim=0)
-                g = torch.sum(cumsum_hazard_ratio) / torch.sum(h)
-                logL -= g
-            else:
-                # compute the log-likelihood for uncensored samples
-                logL -= logits[ix] * fail_indicator[ix]
+        logL = -torch.mean(uncensored_likelihood)
+    else: 
+        raise NotImplementedError("Method not implemented")
 
-    # negative average log-likelihood
-    # observations = torch.sum(fail_indicator, 0)
     return logL

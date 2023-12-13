@@ -1,10 +1,10 @@
 
-from minimalistic_network import MinimalisticNetwork
+from models import MinimalisticNetwork
 
 import torch.nn
 import torch.optim
 import torch.utils.data.dataloader
-from evaluation import concordance_index_censored, PartialLogLikelihood
+from evaluation import concordance_index_censored, PartialLogLikelihood, PartialMSE
 import logging
 
 
@@ -25,14 +25,15 @@ def train_model(dataset, params, writer=None, **kwargs):
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_ind, len(dataset) - train_ind],
                                                                 generator=gen)
     dataloader = torch.utils.data.dataloader.DataLoader(train_dataset, batch_size=params["batch_size"],
-                                                        shuffle=True, drop_last=True)
-    dataloader_test = torch.utils.data.dataloader.DataLoader(test_dataset, batch_size=len(test_dataset), drop_last=True)
+                                                        shuffle=True, drop_last=False)
+    dataloader_test = torch.utils.data.dataloader.DataLoader(test_dataset, batch_size=len(test_dataset), drop_last=False)
 
     print(f"Train: {len(train_dataset)} - Test: {len(test_dataset)}")
     print(f"Dataloader Train: {len(dataloader)} - Test: {len(dataloader_test)}")
     model = get_model(params)
     optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=params["weight_decay"])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=15, eta_min=1e-6)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=15, eta_min=1e-6)
+    loss_fn = params["loss_fn"]
     losses = []
     losses_test = []
     c_indices = []
@@ -46,13 +47,13 @@ def train_model(dataset, params, writer=None, **kwargs):
             y_time = y_time.to(params["device"])
             y_event = y_event.to(params["device"])
             optimizer.zero_grad()
-            y_pred = model(X, encoder_combination=params["encoder_combination"], regularize=params["regularize_output"])
+            y_pred = model(X) #, encoder_combination=params["encoder_combination"], regularize=params["regularize_output"])
             y_pred = torch.flatten(y_pred, 0)
             
             # Only calculate the loss if there is non-censored data
             if y_event.sum() > 1:
-                loss = PartialLogLikelihood(y_pred, y_event, y_time, ties="noties")
-                
+                #loss = PartialLogLikelihood(y_pred, y_event, y_time, ties="noties")
+                loss = loss_fn(y_pred,y_event, y_time)
                 loss.backward()
                 loss_train += loss.item()
                 optimizer.step()
@@ -91,7 +92,8 @@ def train_model(dataset, params, writer=None, **kwargs):
                 y_pred = torch.flatten(y_pred, 0)
                 y_time = y_time
             
-                loss = PartialLogLikelihood(y_pred, y_event, y_time, ties="noties")
+                #loss = PartialLogLikelihood(y_pred, y_event, y_time, ties="noties")
+                loss = loss_fn(y_pred,y_event, y_time)
                 loss_test += loss.item()
                 c_index += concordance_index_censored(y_event.numpy().astype(bool), y_time.numpy(), y_pred.numpy())[0]
 
@@ -104,7 +106,7 @@ def train_model(dataset, params, writer=None, **kwargs):
         if writer is not None:
             writer.add_scalar("Loss/test", loss_test / len(dataloader_test), epoch)
             writer.add_scalar("C-Index/test", c_index / len(dataloader_test), epoch)
-        scheduler.step()
+        # scheduler.step()
 
     test_eval = {"loss": losses_test, "c_index": c_indices_test}
     return model, losses, test_eval

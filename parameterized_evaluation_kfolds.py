@@ -1,6 +1,6 @@
 from sklearn.ensemble import RandomForestClassifier
 import torch
-
+from sksurv.metrics import as_concordance_index_ipcw_scorer
 from pathlib import Path
 
 import evaluation
@@ -11,7 +11,7 @@ import yaml
 from data_loading import import_vonko
 from data_preprocessing import (calculate_survival_time,
                                 encode_selected_variables)
-from evaluation import PartialLogLikelihood
+from evaluation import PartialLogLikelihood, PartialMSE
 # import wandb_training
 from sklearn.experimental import enable_iterative_imputer  # noqa
 from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
@@ -23,7 +23,7 @@ from sksurv.linear_model import CoxPHSurvivalAnalysis
 from sksurv.util import Surv
 from training_survival_analysis import train_model
 from data_preprocessing import tumorDataset
-from pytorch_tabnet.tab_model import TabNetRegressor
+from models import TabNetSurvivalRegressor
 import argparse
 import logging
 import explainability
@@ -34,6 +34,7 @@ if __name__ == "__main__":
     parser.add_argument("--deep_surv_model", type=str, default="none", help="If model is deep_surv, which specific deep_surv model to use")
     parser.add_argument("--tnm", action="store_true", help="Use TNM instead of UICC")
     parser.add_argument("--one-hot", action="store_true", help="Use one-hot encoding instead of label encoding")
+    parser.add_argument("--loss", type=str, default="pll", help="Which loss function to use for Tabnet and Deep_Surv")
     args = parser.parse_args()
     
 
@@ -42,6 +43,13 @@ if __name__ == "__main__":
         raise ValueError("Model not implemented")
     if args.imputation_method not in ["none", "KNNImputer", "SimpleImputer", "MissForest"]:
         raise ValueError("Imputation method not implemented")
+    if args.loss == "pll":
+        loss_fn = PartialLogLikelihood
+    elif args.loss == "mse":
+        loss_fn = PartialMSE
+    else:
+        raise ValueError("Loss function not implemented")
+    
     
     imputation_features = ["geschl", "alter", "uicc", "histo_gr", "vit_status", "survival_time"]
     selected_features = ["geschl", "alter", "histo_gr", "uicc"]  
@@ -153,14 +161,18 @@ if __name__ == "__main__":
     # create k folds and save them
     kfold = KFold(n_splits=5, shuffle=True, random_state=random_state)
     folds = kfold.split(X_train, y_train)
-    best_params = yaml.safe_load(Path(f"{base_path}/results/{study_name}/parameters_study_{model}.yaml").read_text())
+    model_path = f"{base_path}/results/{study_name}/parameters_study_{model}"
+    if model=="tabnet" or model == "deep_surv":
+        model_path += f"_{args.loss}"
+    best_params = yaml.safe_load(Path(f"{model_path}.yaml").read_text())
 
     if model == "deep_surv":
         stable_params = {
             "device": config["device"],
             "model": dsmodel,
             "epochs": 300,
-            "input_dim": len(X.columns)
+            "input_dim": len(X.columns),
+            "loss_fn" : loss_fn
         }
 
         
@@ -184,7 +196,7 @@ if __name__ == "__main__":
         elif model == "deep_surv":
             dataset_train = tumorDataset(X_train.iloc[train_fold], y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
             best_model, losses, test_eval = train_model(dataset_train, {**stable_params, **best_params})
-            model.eval()
+            best_model.eval()
             y_pred = best_model(torch.Tensor(X_train.iloc[test_fold].values).to(stable_params["device"])).detach().cpu().numpy()
 
             scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
@@ -203,29 +215,49 @@ if __name__ == "__main__":
             cat_idxs = [0,2,3]
             if subset == "tnm":
                 cat_idxs = [0,2,3,4,5]
-            best_model = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, seed=random_state,
+            best_model = TabNetSurvivalRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, seed=random_state,
                                          device_name=config["device"], n_a=best_params["n_d"], **best_params_subset)
-            y_train_numpy = np.expand_dims(y_train["vit_status"][train_fold],1) # np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1)
+            y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) # np.expand_dims(y_train["vit_status"][train_fold],1) 
             best_model.fit(
                 X_train.iloc[train_fold].values, y_train_numpy,
-                loss_fn=PartialLogLikelihood
+                loss_fn=loss_fn
             )
             scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
                                                         y_train[test_fold])
-
-        result = permutation_importance(
-            best_model, X_train.iloc[test_fold], y_train[test_fold], n_repeats=15, random_state=random_state
-        )
+        if True:
+            result = permutation_importance(
+                best_model, X_train.iloc[test_fold], y_train[test_fold], n_repeats=15, random_state=random_state,
+            )
+            permutation_importances = pd.DataFrame(
+                {k: result[k] for k in ("importances_mean", "importances_std",)},
+                index=X_test.columns).sort_values(by="importances_mean", ascending=False)
+            logger.info(f"Permutation Importances:")
+            logger.info(permutation_importances)
         
         logger.info(scores)
 
-        permutation_importances = pd.DataFrame(
-            {k: result[k] for k in ("importances_mean", "importances_std",)},
-            index=X_test.columns
-        ).sort_values(by="importances_mean", ascending=False)
-        logger.info(f"Permutation Importances:")
-        logger.info(permutation_importances)
-        shaps = explainability.SHAP(best_model, X_train.iloc[test_fold][::5], feature_names=selected_features)
+        
+        if model == "tabnet":
+            logger.info("Tabnet Feature Importance:")
+            logger.info(best_model.feature_importances_)
+            if i == 0:
+
+                explain_matrix, masks = best_model.explain(X_train.iloc[test_fold].values)
+                print(len(masks))
+                fig, axs = plt.subplots(1, best_params["n_steps"], figsize=(20,20))
+
+                for j in range(best_params["n_steps"]):
+                    axs[j].imshow(masks[j][:50])
+                    axs[j].set_title(f"mask {j}")
+
+                plt.savefig(f"{path}/matrix_{i}.png")
+                plt.clf()
+
+            shaps = explainability.SHAP(best_model, X_train.iloc[test_fold][::5].values, feature_names=selected_features)
+
+                
+        else:
+            shaps = explainability.SHAP(best_model, X_train.iloc[test_fold][::5], feature_names=selected_features)
         violin = shaps.plot_violin()
         plt.savefig(f"{path}/violin_fold_{i}_{model}.png")
         plt.clf()
