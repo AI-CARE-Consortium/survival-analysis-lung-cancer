@@ -1,5 +1,5 @@
 
-base_path: /data1/germer/survival-analysis-lung-cancer
+base_path: /your/base/path
 device: cuda:1
 rsf:
   n_estimators: 
