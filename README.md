@@ -5,7 +5,7 @@
 
 
 
-### Authors: Sebastian Germer, Christiane Rudolph, Louisa Labohm, Alexander Katalinic, Natalie Rath, Katharina Rausch, Heinz Handels and the AI-CARE consortium
+### Authors: Sebastian Germer, Christiane Rudolph, Louisa Labohm, Alexander Katalinic, Natalie Rath, Katharina Rausch, Bernd Holleczek, Heinz Handels and the AI-CARE consortium
 
 # How to Use
 - Install required packages (Pytorch, Scikit-Surv, Scikit-Learn, Tabnet, SHAP) via conda (see enviroment.yaml)
@@ -24,4 +24,4 @@
 
 # How to Cite
 A journal paper in currently in writing. In the meantime, you can cite this repository using
-> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., Handels, H., & AI-CARE-Consortium. (2023). AI-CARE-Consortium/survival-analysis-lung-cancer: v.1.0 (v.1.0). Zenodo. https://doi.org/10.5281/zenodo.10401221
+> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., Holleczek, B., Handels, H., & AI-CARE-Consortium. (2023). AI-CARE-Consortium/survival-analysis-lung-cancer: v.1.0 (v.1.0). Zenodo. https://doi.org/10.5281/zenodo.10401221
