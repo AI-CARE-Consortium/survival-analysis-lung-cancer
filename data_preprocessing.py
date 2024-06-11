@@ -8,7 +8,9 @@ from typing import List, Tuple
 import numpy as np
 import sklearn
 import sklearn.preprocessing as preprocessing
-
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
+from sklearn.ensemble import RandomForestClassifier
 sys.path.append('./')
 
 # sklearn.set_config(transform_output="pandas")
@@ -47,7 +49,47 @@ def encode_selected_variables(dataframe: pd.DataFrame, selected_variables: List[
 
 
 
+def imputation(X:pd.DataFrame, imputation_method:str, one_hot, logger, random_state, imputation_features=None, selected_features=None):
+    # Impute missing values
+    if imputation_features is not None:
+        X = X[imputation_features].copy()
+    #logger.info(f"Length before Imputation: {len(X)}")
+    #logger.info(f"Imputation Method: {imputation_method}")
+    
+    
+    if imputation_method == "none":
+        pass
+    elif imputation_method == "KNNImputer":
+        imputer = KNNImputer(missing_values=-1, n_neighbors=1, weights="uniform")
+        X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, copy=True)
+    elif imputation_method == "SimpleImputer":
+        imputer = SimpleImputer(missing_values=-1, strategy="most_frequent")
+        X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, copy=True)
+    elif imputation_method == "MissForest":
+        # Simple MissForest emulated with a RDF combined with the Iterative Imputer
+        iterative_imputer = IterativeImputer(missing_values=-1, max_iter=100,
+                                        estimator= RandomForestClassifier(
+                                                n_estimators=4,
+                                                max_depth=10,
+                                                bootstrap=True,
+                                                max_samples=0.5,
+                                                n_jobs=2,
+                                                random_state=0,
+                                        ),
+                                        initial_strategy='most_frequent', random_state=random_state)
+        X = pd.DataFrame(iterative_imputer.fit_transform(X), columns=X.columns, copy=True)
+    else:
+        raise ValueError("Imputation method not found")
+    #logger.info(f"Length after Imputation: {len(X)}")
+    if selected_features is not None:
+        X = X[selected_features]
+    if one_hot:
+        if "tnm_t" in imputation_features:
+            X = pd.get_dummies(X, columns=["geschl", "histo_gr", "tnm_t", "tnm_n", "tnm_m"])
+        else:
+            X = pd.get_dummies(X, columns=["geschl", "histo_gr", "uicc"])
 
+    return X
 
 
 

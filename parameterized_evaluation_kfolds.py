@@ -10,7 +10,8 @@ import pandas as pd
 import yaml
 from data_loading import import_vonko
 from data_preprocessing import (calculate_survival_time,
-                                encode_selected_variables)
+                                encode_selected_variables,
+                                imputation)
 from evaluation import PartialLogLikelihood, PartialMSE
 # import wandb_training
 from sklearn.experimental import enable_iterative_imputer  # noqa
@@ -35,6 +36,7 @@ if __name__ == "__main__":
     parser.add_argument("--tnm", action="store_true", help="Use TNM instead of UICC")
     parser.add_argument("--one-hot", action="store_true", help="Use one-hot encoding instead of label encoding")
     parser.add_argument("--loss", type=str, default="pll", help="Which loss function to use for Tabnet and Deep_Surv")
+    parser.add_argument("--imputation_before", action="store_true", help="Impute the data before splitting or afterwards")
     args = parser.parse_args()
     
 
@@ -100,57 +102,17 @@ if __name__ == "__main__":
     y = Surv.from_dataframe("vit_status", "survival_time", y)
 
     # Impute missing values
-    X = X[imputation_features].copy()
-    logger.info(f"Length before Imputation: {len(X)}")
-    logger.info(f"Imputation Method: {args.imputation_method}")
     
     if args.imputation_method == "none":
         # for each column in selected_features, replace -1 with number of categories + 1
-        X = X[selected_features]
         for feature in selected_features:
-            X[feature] = X[feature].replace(-1, len(X[feature].unique())-1, inplace=False)
+            X[feature].replace(-1, len(X[feature].unique())-1, inplace=True)
 
+    if args.imputation_before:
+        X = imputation(X, imputation_features=imputation_features, selected_features=selected_features, imputation_method=args.imputation_method, one_hot=args.one_hot,
+                       logger=logger, random_state=random_state)
 
-        # print(X["uicc"].unique())
-        # if subset == "tnm":
-        #     X["tnm_t"] = X["tnm_t"].replace(-1, 5, inplace=False)
-        #     X["tnm_n"] = X["tnm_n"].replace(-1, 4, inplace=False)
-        #     X["tnm_m"] = X["tnm_m"].replace(-1, 2, inplace=False)
-        # elif subset == "big_subset":
-        #     X["uicc"] = X["uicc"].replace(-1, 4, inplace=False)
-            
-        # else:
-        #     X["uicc"] = X["uicc"].replace(-1, 4, inplace=False)
-    elif args.imputation_method == "KNNImputer":
-        imputer = KNNImputer(missing_values=-1, n_neighbors=1, weights="uniform")
-        X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, copy=True)
-    elif args.imputation_method == "SimpleImputer":
-        imputer = SimpleImputer(missing_values=-1, strategy="most_frequent")
-        X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, copy=True)
-    elif args.imputation_method == "MissForest":
-        iterative_imputer = IterativeImputer(missing_values=-1, max_iter=100,
-                                        estimator= RandomForestClassifier(
-                                                n_estimators=4,
-                                                max_depth=10,
-                                                bootstrap=True,
-                                                max_samples=0.5,
-                                                n_jobs=2,
-                                                random_state=0,
-                                        ),
-                                        initial_strategy='most_frequent', random_state=random_state)
-        X = pd.DataFrame(iterative_imputer.fit_transform(X), columns=X.columns, copy=True)
-    else:
-        raise ValueError("Imputation method not found")
-    logger.info(f"Length after Imputation: {len(X)}")
-
-    X = X[selected_features]
-
-    if args.one_hot:
-        if subset == "tnm":
-            X = pd.get_dummies(X, columns=["geschl", "histo_gr", "tnm_t", "tnm_n", "tnm_m"])
-        else:
-            X = pd.get_dummies(X, columns=["geschl", "histo_gr", "uicc"])
-        
+       
 
     # Select Features for training
     
@@ -179,28 +141,36 @@ if __name__ == "__main__":
     logger.info("RESULTS")
     logger.info(f"Best params: {best_params}")
     logger.info("Evaluating best model on test set")
-    for i, (train_fold , test_fold) in enumerate(kfold.split(X_train, y_train)):
+    for i, (train_fold , val_fold) in enumerate(kfold.split(X_train, y_train)):
+        if not args.imputation_before:
+            X_train_fold = imputation(X_train.iloc[train_fold], imputation_features=imputation_features, selected_features=selected_features, 
+                                      imputation_method=args.imputation_method, one_hot=args.one_hot, logger=logger, random_state=random_state)
+            X_val_fold = imputation(X_train.iloc[val_fold], imputation_features=imputation_features, selected_features=selected_features,
+                                    imputation_method=args.imputation_method, one_hot=args.one_hot, logger=logger, random_state=random_state)
+        else:
+            X_train_fold = X_train.iloc[train_fold]
+            X_val_fold = X_train.iloc[val_fold]
         logger.info(f"Fold {i}:")
         if model == "rsf":
             best_model = RandomSurvivalForest(**best_params, random_state=random_state, n_jobs=32)
-            best_model.fit(X_train.iloc[train_fold], y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold], y_train[train_fold],
-                                                    y_train[test_fold])
+            best_model.fit(X_train_fold, y_train[train_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
+                                                    y_train[val_fold])
         elif model == "cox":
             best_model = CoxPHSurvivalAnalysis(**best_params)
-            best_model.fit(X_train.iloc[train_fold], y_train[train_fold])
+            best_model.fit(X_train_fold, y_train[train_fold])
             logger.info("Betas:")
             logger.info(best_model.coef_)
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold], y_train[train_fold],
-                                                    y_train[test_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
+                                                    y_train[val_fold])
         elif model == "deep_surv":
-            dataset_train = tumorDataset(X_train.iloc[train_fold], y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
+            dataset_train = tumorDataset(X_train_fold, y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
             best_model, losses, test_eval = train_model(dataset_train, {**stable_params, **best_params})
             best_model.eval()
-            y_pred = best_model(torch.Tensor(X_train.iloc[test_fold].values).to(stable_params["device"])).detach().cpu().numpy()
+            y_pred = best_model(torch.Tensor(X_val_fold.values).to(stable_params["device"])).detach().cpu().numpy()
 
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
-                                                        y_train[test_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
+                                                        y_train[val_fold])
         elif model == "tabnet":
             optimizer_params = {
                 "lr": best_params["lr"],
@@ -219,14 +189,14 @@ if __name__ == "__main__":
                                          device_name=config["device"], n_a=best_params["n_d"], **best_params_subset)
             y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) # np.expand_dims(y_train["vit_status"][train_fold],1) 
             best_model.fit(
-                X_train.iloc[train_fold].values, y_train_numpy,
+                X_train_fold.values, y_train_numpy,
                 loss_fn=loss_fn
             )
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
-                                                        y_train[test_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
+                                                        y_train[val_fold])
         if True:
             result = permutation_importance(
-                best_model, X_train.iloc[test_fold], y_train[test_fold], n_repeats=15, random_state=random_state,
+                best_model, X_val_fold, y_train[val_fold], n_repeats=15, random_state=random_state,
             )
             permutation_importances = pd.DataFrame(
                 {k: result[k] for k in ("importances_mean", "importances_std",)},
@@ -242,7 +212,7 @@ if __name__ == "__main__":
             logger.info(best_model.feature_importances_)
             if i == 0:
 
-                explain_matrix, masks = best_model.explain(X_train.iloc[test_fold].values)
+                explain_matrix, masks = best_model.explain(X_val_fold.values)
                 print(len(masks))
                 fig, axs = plt.subplots(1, best_params["n_steps"], figsize=(20,20))
 
@@ -253,11 +223,11 @@ if __name__ == "__main__":
                 plt.savefig(f"{path}/matrix_{i}.png")
                 plt.clf()
 
-            shaps = explainability.SHAP(best_model, X_train.iloc[test_fold][::5].values, feature_names=selected_features)
+            shaps = explainability.SHAP(best_model, X_val_fold[::5].values, feature_names=selected_features)
 
                 
         else:
-            shaps = explainability.SHAP(best_model, X_train.iloc[test_fold][::5], feature_names=selected_features)
+            shaps = explainability.SHAP(best_model, X_val_fold[::5], feature_names=selected_features)
         violin = shaps.plot_violin()
         plt.savefig(f"{path}/violin_fold_{i}_{model}.png")
         plt.clf()
