@@ -11,10 +11,10 @@ import numpy as np
 import optuna
 import pandas as pd
 import yaml
-from data_loading import import_vonko
-from data_preprocessing import (calculate_survival_time,
-                                encode_selected_variables,
-                                imputation)
+from datenimport_aicare.data_loading import import_vonko
+from datenimport_aicare.data_preprocessing import (calculate_survival_time,
+                                                   encode_selected_variables,
+                                                   imputation)
 from evaluation import PartialLogLikelihood, PartialMSE
 from sklearn.model_selection import KFold, train_test_split
 from sksurv.ensemble import RandomSurvivalForest
@@ -119,7 +119,7 @@ if __name__ == "__main__":
 
 
 
-    X = calculate_survival_time(X)
+    X["survival_time"] = calculate_survival_time(X)
     X, encoder = encode_selected_variables(X, imputation_features, na_sentinel=True)
 
     y = pd.DataFrame({'vit_status': X['vit_status'].astype(bool),

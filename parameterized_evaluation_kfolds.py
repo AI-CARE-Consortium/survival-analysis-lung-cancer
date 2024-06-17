@@ -1,6 +1,4 @@
-from sklearn.ensemble import RandomForestClassifier
 import torch
-from sksurv.metrics import as_concordance_index_ipcw_scorer
 from pathlib import Path
 
 import evaluation
@@ -8,14 +6,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
-from data_loading import import_vonko
-from data_preprocessing import (calculate_survival_time,
-                                encode_selected_variables,
-                                imputation)
+from datenimport_aicare.data_loading import import_vonko
+from datenimport_aicare.data_preprocessing import (calculate_survival_time,
+                                                   encode_selected_variables,
+                                                   imputation)
 from evaluation import PartialLogLikelihood, PartialMSE
-# import wandb_training
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import KFold, train_test_split
 from sksurv.ensemble import RandomSurvivalForest
@@ -92,7 +87,7 @@ if __name__ == "__main__":
 
     X = vonko["Tumoren"].copy()
 
-    X = calculate_survival_time(X)
+    X["survival_time"] = calculate_survival_time(X)
     X, encoder = encode_selected_variables(X, imputation_features, na_sentinel=True)
     # X = X.replace(-1, np.nan, inplace=False)
     # X = X.dropna(axis=0, how="any", subset=selected_features)
