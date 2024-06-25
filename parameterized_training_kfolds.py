@@ -11,15 +11,16 @@ import numpy as np
 import optuna
 import pandas as pd
 import yaml
-from datenimport_aicare.data_loading import import_vonko
+from datenimport_aicare.data_loading import import_vonko, import_aicare
 from datenimport_aicare.data_preprocessing import (calculate_survival_time,
                                                    encode_selected_variables,
-                                                   imputation)
+                                                   imputation,
+                                                   get_morphology_groups)
 from evaluation import PartialLogLikelihood, PartialMSE
 from sklearn.model_selection import KFold, train_test_split
 from sksurv.ensemble import RandomSurvivalForest
 from sksurv.metrics import concordance_index_censored
-from sksurv.linear_model import CoxPHSurvivalAnalysis
+from sksurv.linear_model import CoxPHSurvivalAnalysis, CoxnetSurvivalAnalysis
 from sksurv.util import Surv
 from training_survival_analysis import train_model
 from data_preprocessing import tumorDataset
@@ -58,23 +59,24 @@ if __name__ == "__main__":
             selected_features = ["geschl", "alter", "histo_gr", "tnm_t", "tnm_n", "tnm_m"]
             subset = "tnm"
     elif args.dataset == "aicare":
-        imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Primaertumor_Morphologie_ICD_O", "UICC"]
-        selected_features = imputation_features
+        imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "UICC", "vit_status", "survival_time"]
+        selected_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "UICC"]
         subset = "uicc"
 
         if args.tnm:
-            imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Primaertumor_Morphologie_ICD_O", "TNM_T", "TNM_N", "TNM_M"]
-            selected_features = imputation_features
+            imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "TNM_T", "TNM_N", "TNM_M", "vit_status", "survival_time"]
+            selected_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "TNM_T", "TNM_N", "TNM_M"]
             subset = "tnm"
 
     
     config = yaml.safe_load(Path("./config.yaml").read_text())
     base_path = config["base_path"]
-    study_name=f"{subset}/missings_imputed_with_{args.imputation_method}"
+    study_name=f"{args.dataset}/{subset}/missings_imputed_with_{args.imputation_method}"
     if args.one_hot:
         study_name = study_name + "_onehot"
     if args.imputation_before:
         study_name = study_name + "_imputation_before_splitting"
+    
     study_db="sqlite:///optuna.db"
     #If folder does not exist, create it
     if model == "deep_surv":
@@ -86,6 +88,10 @@ if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     log_path = f"{base_path}/results/{study_name}/log_study_{model}"
+
+    if args.dataset == "aicare":
+        log_path += f"_registry{config['registry']}"
+        log_path += f"_entity_{config['entity']}"
     
     if model=="deep_surv":
         log_path += f"_{dsmodel}_{args.loss}.txt"    
@@ -114,12 +120,20 @@ if __name__ == "__main__":
                             processed_data=True, extra_features=True, simplify=True)
         
         X = vonko["Tumoren"].copy()
+        X["survival_time"] = calculate_survival_time(X, "vitdat", "diagdat")
     elif args.dataset == "aicare":
-        pass
+        aicare_dataset = import_aicare(f"{base_path}/aicare/aicare_gesamt/", tumor_entity=config["entity"], registry=config["registry"])
+        X = pd.merge(aicare_dataset["patient"], aicare_dataset["tumor"], how="left", left_on="Patient_ID", right_on="Patient_ID_FK")
+        X["survival_time"] = calculate_survival_time(X, "Datum_Vitalstatus", "Diagnosedatum")
+        morphology_groups, morpho_df = get_morphology_groups(X["Primaertumor_Morphologie_ICD_O"], basepath=f"{base_path}/aicare", entity = config["entity"], ontoserver_url=config["ontoserver_url"])
+        X["Morphologie_Gruppe"] = morphology_groups
+        X["Morphologie_Gruppe"] = X.loc[:, "Morphologie_Gruppe"].astype(pd.CategoricalDtype(ordered=True))
+        X = X[X["survival_time"]>=0]
+        X["Alter_bei_Diagnose"] = (X['Diagnosedatum'] - X['Geburtsdatum']).dt.days // 365.25
+        X.rename(columns={"Verstorben": "vit_status"}, inplace=True)
 
 
-
-    X["survival_time"] = calculate_survival_time(X)
+    
     X, encoder = encode_selected_variables(X, imputation_features, na_sentinel=True)
 
     y = pd.DataFrame({'vit_status': X['vit_status'].astype(bool),
@@ -130,7 +144,7 @@ if __name__ == "__main__":
     if args.imputation_method == "none":
         # for each column in selected_features, replace -1 with number of categories + 1
         for feature in selected_features:
-            X[feature].replace(-1, len(X[feature].unique())-1, inplace=True)
+            X[feature] = X[feature].replace(-1, len(X[feature].unique())-1)
     
     if args.imputation_before:
         X = imputation(X, imputation_features=imputation_features, selected_features=selected_features, imputation_method=args.imputation_method, one_hot=args.one_hot,
@@ -179,7 +193,7 @@ if __name__ == "__main__":
         
         scores = []
         for train_fold, _ in kfold.split(X_train, y_train):
-            model = RandomSurvivalForest(**params, random_state=random_state, n_jobs=32)
+            model = RandomSurvivalForest(**params, random_state=random_state, n_jobs=8)
             if not args.imputation_before:
                 X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
                                             one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
@@ -275,7 +289,16 @@ if __name__ == "__main__":
         scores= []
         for foldnr, (train_fold, _) in enumerate(kfold.split(X_train, y_train)):
             y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) #np.expand_dims(y_train["vit_status"][train_fold],1) # 
-            cat_dims = [len(pd.unique(X_train[feature])) for feature in selected_features if feature != "alter"]
+            if not args.imputation_before:
+                X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
+                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
+            else:
+                X_train_fold = X_train.iloc[train_fold]
+
+            if args.dataset == "vonko":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "alter"]
+            elif args.dataset == "aicare":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "Alter_bei_Diagnose"]
             
             cat_idxs = [0,2,3]
             if subset == "tnm":
@@ -283,15 +306,11 @@ if __name__ == "__main__":
             tabnet = TabNetSurvivalRegressor(seed=random_state, device_name=config["device"], 
                                      n_a=params["n_d"], cat_idxs=cat_idxs, 
                                      cat_dims=cat_dims, **params)
-            if not args.imputation_before:
-                X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
-                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
-            else:
-                X_train_fold = X_train.iloc[train_fold]
+            
             tabnet.fit(
                 X_train_fold.values, y_train_numpy,
                 loss_fn=loss_fn,
-                max_epochs=50
+                max_epochs=100
             )
             
             with torch.no_grad():
@@ -327,7 +346,7 @@ if __name__ == "__main__":
         }
         study.optimize(lambda trial: objective_deep_surv(trial, stable_params), n_trials=50, n_jobs=2)
     elif model == "tabnet":
-        study.optimize(objective_tabnet, n_trials=50, n_jobs=4)
+        study.optimize(objective_tabnet, n_trials=50, n_jobs=1)
 
     best_params = study.best_trial.params
     logger.info("RESULTS")
@@ -347,13 +366,13 @@ if __name__ == "__main__":
         if model == "rsf":
             best_model = RandomSurvivalForest(**best_params, random_state=random_state, n_jobs=32)
             best_model.fit(X_train_fold, y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
                                                     y_train[val_fold])
             pickle.dump(best_model, open(f"{base_path}/results/{study_name}/model_{i}.pkl", "wb"))
         elif model == "cox":
             best_model = CoxPHSurvivalAnalysis(**best_params)
             best_model.fit(X_train_fold, y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
                                                     y_train[val_fold])
         elif model == "deep_surv":
             dataset_train = tumorDataset(X_train_fold, y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
@@ -371,7 +390,10 @@ if __name__ == "__main__":
             best_params_subset = best_params.copy()
             best_params_subset.pop("lr")
             best_params_subset.pop("weight_decay")
-            cat_dims = [len(pd.unique(X_train_fold[feature])) for feature in selected_features if feature != "alter"]
+            if args.dataset == "vonko":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "alter"]
+            elif args.dataset == "aicare":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "Alter_bei_Diagnose"]
 
             cat_idxs = [0,2,3]
             if subset == "tnm":
