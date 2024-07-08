@@ -1,6 +1,9 @@
 
 base_path: /your/base/path
-device: cuda:1
+device: cuda:0
+registry: "5"
+entity: "lung"
+ontoserver_url: "https://r4.ontoserver.csiro.au/fhir"
 rsf:
   n_estimators: 
     distribution: int_uniform
@@ -16,7 +19,7 @@ rsf:
     max: 30
   max_features:
     distribution: int_uniform
-    min: 1
+    min: 2
     max: len(selected_features)
   max_depth:
     distribution: int_uniform
