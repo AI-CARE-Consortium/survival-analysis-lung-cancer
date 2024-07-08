@@ -366,13 +366,13 @@ if __name__ == "__main__":
         if model == "rsf":
             best_model = RandomSurvivalForest(**best_params, random_state=random_state, n_jobs=32)
             best_model.fit(X_train_fold, y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
                                                     y_train[val_fold])
             pickle.dump(best_model, open(f"{base_path}/results/{study_name}/model_{i}.pkl", "wb"))
         elif model == "cox":
             best_model = CoxPHSurvivalAnalysis(**best_params)
             best_model.fit(X_train_fold, y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
                                                     y_train[val_fold])
         elif model == "deep_surv":
             dataset_train = tumorDataset(X_train_fold, y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
@@ -410,7 +410,17 @@ if __name__ == "__main__":
                                                         y_train[val_fold])
         logger.info(f"Fold {i}:")
         logger.info(scores)
-        Path(f"{base_path}/results/{study_name}/parameters_study_{model}_{args.loss}.yaml").write_text(yaml.dump(best_params))
+        hyperparameter_path = f"{base_path}/results/{study_name}/parameters_study_{model}"
+        if args.dataset == "aicare":
+            hyperparameter_path += f"_registry{config['registry']}"
+            hyperparameter_path += f"_entity_{config['entity']}"
+        if model=="deep_surv":
+            hyperparameter_path += f"_{dsmodel}_{args.loss}.yaml"
+        elif model=="tabnet":
+            hyperparameter_path += f"_{args.loss}.yaml"
+        else:
+            hyperparameter_path += ".yaml"
+        Path(hyperparameter_path).write_text(yaml.dump(best_params))
 
         
         

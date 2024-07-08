@@ -24,7 +24,7 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
 
     # Remove times that are larger than the maximum survival time in the test set
     times = times[times < int(y_test_numpy['survival_time'].max())]
-    
+
     if isinstance(model, torch.nn.Module):
         model.eval()
         model.cpu()
@@ -59,6 +59,7 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
     #for the AUC we need the survival time to be less than the maximum survival time in the training set 
     test_selection = np.where(y_test_numpy["survival_time"]<= y_train_numpy["survival_time"].max())
     y_test_numpy = y_test_numpy[test_selection]
+    y_pred = y_pred[test_selection]
     if isinstance(X_test, pd.DataFrame):
         X_test = X_test.iloc[test_selection]
     else:
