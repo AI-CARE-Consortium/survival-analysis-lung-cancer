@@ -15,7 +15,8 @@ from datenimport_aicare.data_loading import import_vonko, import_aicare
 from datenimport_aicare.data_preprocessing import (calculate_survival_time,
                                                    encode_selected_variables,
                                                    imputation,
-                                                   get_morphology_groups)
+                                                   get_morphology_groups,
+                                                   tumorDataset)
 from evaluation import PartialLogLikelihood, PartialMSE
 from sklearn.model_selection import KFold, train_test_split
 from sksurv.ensemble import RandomSurvivalForest
@@ -23,7 +24,6 @@ from sksurv.metrics import concordance_index_censored
 from sksurv.linear_model import CoxPHSurvivalAnalysis, CoxnetSurvivalAnalysis
 from sksurv.util import Surv
 from training_survival_analysis import train_model
-from data_preprocessing import tumorDataset
 from models import TabNetSurvivalRegressor
 import argparse
 import logging

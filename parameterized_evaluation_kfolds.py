@@ -9,7 +9,8 @@ import yaml
 from datenimport_aicare.data_loading import import_vonko, import_aicare
 from datenimport_aicare.data_preprocessing import (calculate_survival_time,
                                                    encode_selected_variables,
-                                                   imputation, get_morphology_groups)
+                                                   imputation, get_morphology_groups,
+                                                   tumorDataset)
 from evaluation import PartialLogLikelihood, PartialMSE
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import KFold, train_test_split
@@ -18,7 +19,6 @@ from sklearn.inspection import permutation_importance
 from sksurv.linear_model import CoxPHSurvivalAnalysis
 from sksurv.util import Surv
 from training_survival_analysis import train_model
-from data_preprocessing import tumorDataset
 from models import TabNetSurvivalRegressor
 import argparse
 import logging
