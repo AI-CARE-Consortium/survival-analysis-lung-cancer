@@ -6,10 +6,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
-from datenimport_aicare.data_loading import import_vonko
+from datenimport_aicare.data_loading import import_vonko, import_aicare
 from datenimport_aicare.data_preprocessing import (calculate_survival_time,
                                                    encode_selected_variables,
-                                                   imputation)
+                                                   imputation, get_morphology_groups)
 from evaluation import PartialLogLikelihood, PartialMSE
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import KFold, train_test_split
@@ -32,6 +32,7 @@ if __name__ == "__main__":
     parser.add_argument("--one-hot", action="store_true", help="Use one-hot encoding instead of label encoding")
     parser.add_argument("--loss", type=str, default="pll", help="Which loss function to use for Tabnet and Deep_Surv")
     parser.add_argument("--imputation_before", action="store_true", help="Impute the data before splitting or afterwards")
+    parser.add_argument("--dataset", type=str, default="vonko", help="Which dataset to use")
     args = parser.parse_args()
     
 
@@ -48,18 +49,28 @@ if __name__ == "__main__":
         raise ValueError("Loss function not implemented")
     
     
-    imputation_features = ["geschl", "alter", "uicc", "histo_gr", "vit_status", "survival_time"]
-    selected_features = ["geschl", "alter", "histo_gr", "uicc"]  
-    subset = "uicc"
-    if args.tnm:
-        imputation_features = ["geschl", "alter", "tnm_t", "tnm_n", "tnm_m", "histo_gr", "vit_status", "survival_time"]
-        selected_features = ["geschl", "alter", "histo_gr", "tnm_t", "tnm_n", "tnm_m"]
-        subset = "tnm"
+    if args.dataset =="vonko":
+        imputation_features = ["geschl", "alter", "uicc", "histo_gr", "vit_status", "survival_time"]
+        selected_features = ["geschl", "alter", "histo_gr", "uicc"]  
+        subset = "uicc"
+        if args.tnm:
+            imputation_features = ["geschl", "alter", "tnm_t", "tnm_n", "tnm_m", "histo_gr", "vit_status", "survival_time"]
+            selected_features = ["geschl", "alter", "histo_gr", "tnm_t", "tnm_n", "tnm_m"]
+            subset = "tnm"
+    elif args.dataset == "aicare":
+        imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "UICC", "vit_status", "survival_time"]
+        selected_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "UICC"]
+        subset = "uicc"
+
+        if args.tnm:
+            imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "TNM_T", "TNM_N", "TNM_M", "vit_status", "survival_time"]
+            selected_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "TNM_T", "TNM_N", "TNM_M"]
+            subset = "tnm"
 
     config = yaml.safe_load(Path("./config.yaml").read_text())
     base_path = config["base_path"]
 
-    study_name=f"{subset}/missings_imputed_with_{args.imputation_method}"
+    study_name=f"{args.dataset}/{subset}/missings_imputed_with_{args.imputation_method}"
     if args.one_hot:
         study_name = study_name + "_onehot"
     #If folder does not exist, create it
@@ -71,7 +82,11 @@ if __name__ == "__main__":
     path.mkdir(parents=True, exist_ok=True)
     #Set up logging
     logger = logging.getLogger()
-    logger.addHandler(logging.FileHandler(f"{path}/evaluation_log_{model}.txt"))
+    log_path = f"{path}/evaluation_log_{model}"
+    if args.dataset == "aicare":
+        log_path += f"_registry{config['registry']}"
+        log_path += f"_entity_{config['entity']}"
+    logger.addHandler(logging.FileHandler(f"{log_path}.txt"))
     logger.setLevel(logging.INFO)
     
     
@@ -82,12 +97,25 @@ if __name__ == "__main__":
 
 
     # Import Dataset + Preprocessing
-    vonko = import_vonko(f"{base_path}/data/", oncotree_data=False,
-                        processed_data=True, extra_features=True, simplify=True)
+    if args.dataset == "vonko":
+        vonko = import_vonko(f"{base_path}/aicare/raw/", oncotree_data=False,
+                            processed_data=True, extra_features=True, simplify=True)
+        
+        X = vonko["Tumoren"].copy()
+        X["survival_time"] = calculate_survival_time(X, "vitdat", "diagdat")
+    elif args.dataset == "aicare":
+        aicare_dataset = import_aicare(f"{base_path}/aicare/aicare_gesamt/", tumor_entity=config["entity"], registry=config["registry"])
+        X = pd.merge(aicare_dataset["patient"], aicare_dataset["tumor"], how="left", left_on="Patient_ID", right_on="Patient_ID_FK")
+        X["survival_time"] = calculate_survival_time(X, "Datum_Vitalstatus", "Diagnosedatum")
+        morphology_groups, morpho_df = get_morphology_groups(X["Primaertumor_Morphologie_ICD_O"], basepath=f"{base_path}/aicare", entity = config["entity"], ontoserver_url=config["ontoserver_url"])
+        X["Morphologie_Gruppe"] = morphology_groups
+        X["Morphologie_Gruppe"] = X.loc[:, "Morphologie_Gruppe"].astype(pd.CategoricalDtype(ordered=True))
+        X = X[X["survival_time"]>=0]
+        X["Alter_bei_Diagnose"] = (X['Diagnosedatum'] - X['Geburtsdatum']).dt.days // 365.25
+        X.rename(columns={"Verstorben": "vit_status"}, inplace=True)
 
-    X = vonko["Tumoren"].copy()
 
-    X["survival_time"] = calculate_survival_time(X)
+    
     X, encoder = encode_selected_variables(X, imputation_features, na_sentinel=True)
     # X = X.replace(-1, np.nan, inplace=False)
     # X = X.dropna(axis=0, how="any", subset=selected_features)
@@ -101,7 +129,7 @@ if __name__ == "__main__":
     if args.imputation_method == "none":
         # for each column in selected_features, replace -1 with number of categories + 1
         for feature in selected_features:
-            X[feature].replace(-1, len(X[feature].unique())-1, inplace=True)
+            X[feature] = X[feature].replace(-1, len(X[feature].unique())-1)
 
     if args.imputation_before:
         X = imputation(X, imputation_features=imputation_features, selected_features=selected_features, imputation_method=args.imputation_method, one_hot=args.one_hot,
@@ -118,10 +146,17 @@ if __name__ == "__main__":
     # create k folds and save them
     kfold = KFold(n_splits=5, shuffle=True, random_state=random_state)
     folds = kfold.split(X_train, y_train)
-    model_path = f"{base_path}/results/{study_name}/parameters_study_{model}"
-    if model=="tabnet" or model == "deep_surv":
-        model_path += f"_{args.loss}"
-    best_params = yaml.safe_load(Path(f"{model_path}.yaml").read_text())
+    hyperparameter_path = f"{base_path}/results/{study_name}/parameters_study_{model}"
+    if args.dataset == "aicare":
+        hyperparameter_path += f"_registry{config['registry']}"
+        hyperparameter_path += f"_entity_{config['entity']}"
+    if model=="deep_surv":
+        hyperparameter_path += f"_{dsmodel}_{args.loss}.yaml"
+    elif model=="tabnet":
+        hyperparameter_path += f"_{args.loss}.yaml"
+    else:
+        hyperparameter_path += ".yaml"
+    best_params = yaml.safe_load(Path(f"{hyperparameter_path}").read_text())
 
     if model == "deep_surv":
         stable_params = {
@@ -193,9 +228,10 @@ if __name__ == "__main__":
             result = permutation_importance(
                 best_model, X_val_fold, y_train[val_fold], n_repeats=15, random_state=random_state,
             )
+            result_dict = {k: result[k] for k in ("importances_mean", "importances_std")}
             permutation_importances = pd.DataFrame(
-                {k: result[k] for k in ("importances_mean", "importances_std",)},
-                index=X_test.columns).sort_values(by="importances_mean", ascending=False)
+                result_dict,
+                index=X_val_fold.columns).sort_values(by="importances_mean", ascending=False)
             logger.info(f"Permutation Importances:")
             logger.info(permutation_importances)
         

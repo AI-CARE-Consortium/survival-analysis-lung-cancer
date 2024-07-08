@@ -10,6 +10,7 @@ import torch
 
 class SHAP():
     def __init__(self, model, X_test, feature_names=None) -> None:
+        X_test = X_test.astype(int)
         if type(model) is RandomForestClassifier:
             self.model = "rdf"
             self.explainer = shap.TreeExplainer(model=model, data=X_test, model_output="probability")
