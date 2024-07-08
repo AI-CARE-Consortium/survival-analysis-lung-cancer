@@ -11,20 +11,19 @@ import numpy as np
 import optuna
 import pandas as pd
 import yaml
-from data_loading import import_vonko
-from data_preprocessing import (calculate_survival_time,
-                                encode_selected_variables)
+from datenimport_aicare.data_loading import import_vonko, import_aicare
+from datenimport_aicare.data_preprocessing import (calculate_survival_time,
+                                                   encode_selected_variables,
+                                                   imputation,
+                                                   get_morphology_groups,
+                                                   tumorDataset)
 from evaluation import PartialLogLikelihood, PartialMSE
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 from sklearn.model_selection import KFold, train_test_split
 from sksurv.ensemble import RandomSurvivalForest
 from sksurv.metrics import concordance_index_censored
-from sksurv.linear_model import CoxPHSurvivalAnalysis
+from sksurv.linear_model import CoxPHSurvivalAnalysis, CoxnetSurvivalAnalysis
 from sksurv.util import Surv
 from training_survival_analysis import train_model
-from data_preprocessing import tumorDataset
-from pytorch_tabnet.tab_model import TabNetRegressor
 from models import TabNetSurvivalRegressor
 import argparse
 import logging
@@ -37,6 +36,8 @@ if __name__ == "__main__":
     parser.add_argument("--tnm", action="store_true", help="Use TNM instead of UICC")
     parser.add_argument("--one-hot", action="store_true", help="Use one-hot encoding instead of label encoding")
     parser.add_argument("--loss", type=str, default="pll", help="Which loss function to use for Tabnet and Deep_Surv")
+    parser.add_argument("--dataset", type=str, default="vonko", help="Which dataset to use")
+    parser.add_argument("--imputation_before", action="store_true", help="Impute the data before splitting or afterwards")
     args = parser.parse_args()
     model = args.model
     if model not in ["rsf", "cox", "deep_surv", "tabnet"]:
@@ -49,21 +50,33 @@ if __name__ == "__main__":
         loss_fn = PartialMSE
     else:
         raise ValueError("Loss function not implemented")
-    
-    imputation_features = ["geschl", "alter", "uicc", "histo_gr", "vit_status", "survival_time"]
-    selected_features = ["geschl", "alter", "histo_gr", "uicc"]  
-    subset = "uicc"
-    if args.tnm:
-        imputation_features = ["geschl", "alter", "tnm_t", "tnm_n", "tnm_m", "histo_gr", "vit_status", "survival_time"]
-        selected_features = ["geschl", "alter", "histo_gr", "tnm_t", "tnm_n", "tnm_m"]
-        subset = "tnm"
+    if args.dataset =="vonko":
+        imputation_features = ["geschl", "alter", "uicc", "histo_gr", "vit_status", "survival_time"]
+        selected_features = ["geschl", "alter", "histo_gr", "uicc"]  
+        subset = "uicc"
+        if args.tnm:
+            imputation_features = ["geschl", "alter", "tnm_t", "tnm_n", "tnm_m", "histo_gr", "vit_status", "survival_time"]
+            selected_features = ["geschl", "alter", "histo_gr", "tnm_t", "tnm_n", "tnm_m"]
+            subset = "tnm"
+    elif args.dataset == "aicare":
+        imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "UICC", "vit_status", "survival_time"]
+        selected_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "UICC"]
+        subset = "uicc"
+
+        if args.tnm:
+            imputation_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "TNM_T", "TNM_N", "TNM_M", "vit_status", "survival_time"]
+            selected_features = ["Geschlecht", "Alter_bei_Diagnose", "Morphologie_Gruppe", "TNM_T", "TNM_N", "TNM_M"]
+            subset = "tnm"
 
     
     config = yaml.safe_load(Path("./config.yaml").read_text())
     base_path = config["base_path"]
-    study_name=f"{subset}/missings_imputed_with_{args.imputation_method}"
+    study_name=f"{args.dataset}/{subset}/missings_imputed_with_{args.imputation_method}"
     if args.one_hot:
         study_name = study_name + "_onehot"
+    if args.imputation_before:
+        study_name = study_name + "_imputation_before_splitting"
+    
     study_db="sqlite:///optuna.db"
     #If folder does not exist, create it
     if model == "deep_surv":
@@ -75,6 +88,10 @@ if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     log_path = f"{base_path}/results/{study_name}/log_study_{model}"
+
+    if args.dataset == "aicare":
+        log_path += f"_registry{config['registry']}"
+        log_path += f"_entity_{config['entity']}"
     
     if model=="deep_surv":
         log_path += f"_{dsmodel}_{args.loss}.txt"    
@@ -98,67 +115,51 @@ if __name__ == "__main__":
     config["rsf"]["max_features"]["max"] = len(selected_features)
 
     # Import Dataset + Preprocessing
-    vonko = import_vonko(f"{base_path}/data/", oncotree_data=False,
-                        processed_data=True, extra_features=True, simplify=True)
+    if args.dataset == "vonko":
+        vonko = import_vonko(f"{base_path}/aicare/raw/", oncotree_data=False,
+                            processed_data=True, extra_features=True, simplify=True)
+        
+        X = vonko["Tumoren"].copy()
+        X["survival_time"] = calculate_survival_time(X, "vitdat", "diagdat")
+    elif args.dataset == "aicare":
+        aicare_dataset = import_aicare(f"{base_path}/aicare/aicare_gesamt/", tumor_entity=config["entity"], registry=config["registry"])
+        X = pd.merge(aicare_dataset["patient"], aicare_dataset["tumor"], how="left", left_on="Patient_ID", right_on="Patient_ID_FK")
+        X["survival_time"] = calculate_survival_time(X, "Datum_Vitalstatus", "Diagnosedatum")
+        morphology_groups, morpho_df = get_morphology_groups(X["Primaertumor_Morphologie_ICD_O"], basepath=f"{base_path}/aicare", entity = config["entity"], ontoserver_url=config["ontoserver_url"])
+        X["Morphologie_Gruppe"] = morphology_groups
+        X["Morphologie_Gruppe"] = X.loc[:, "Morphologie_Gruppe"].astype(pd.CategoricalDtype(ordered=True))
+        X = X[X["survival_time"]>=0]
+        X["Alter_bei_Diagnose"] = (X['Diagnosedatum'] - X['Geburtsdatum']).dt.days // 365.25
+        X.rename(columns={"Verstorben": "vit_status"}, inplace=True)
 
-    X = vonko["Tumoren"].copy()
 
-    X = calculate_survival_time(X)
+    
     X, encoder = encode_selected_variables(X, imputation_features, na_sentinel=True)
 
     y = pd.DataFrame({'vit_status': X['vit_status'].astype(bool),
                     'survival_time': X['survival_time']})
     y = Surv.from_dataframe("vit_status", "survival_time", y)
 
-    # Impute missing values
-    X = X[imputation_features].copy()
-    logger.info(f"Length before Imputation: {len(X)}")
-    logger.info(f"Imputation Method: {args.imputation_method}")
-    
-    
+
     if args.imputation_method == "none":
         # for each column in selected_features, replace -1 with number of categories + 1
-        X = X[selected_features]
         for feature in selected_features:
-            X[feature] = X[feature].replace(-1, len(X[feature].unique())-1, inplace=False)
+            X[feature] = X[feature].replace(-1, len(X[feature].unique())-1)
+    
+    if args.imputation_before:
+        X = imputation(X, imputation_features=imputation_features, selected_features=selected_features, imputation_method=args.imputation_method, one_hot=args.one_hot,
+                       logger=logger, random_state=random_state)
 
-    elif args.imputation_method == "KNNImputer":
-        imputer = KNNImputer(missing_values=-1, n_neighbors=1, weights="uniform")
-        X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, copy=True)
-    elif args.imputation_method == "SimpleImputer":
-        imputer = SimpleImputer(missing_values=-1, strategy="most_frequent")
-        X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, copy=True)
-    elif args.imputation_method == "MissForest":
-        # Simple MissForest emulated with a RDF combined with the Iterative Imputer
-        iterative_imputer = IterativeImputer(missing_values=-1, max_iter=100,
-                                        estimator= RandomForestClassifier(
-                                                n_estimators=4,
-                                                max_depth=10,
-                                                bootstrap=True,
-                                                max_samples=0.5,
-                                                n_jobs=2,
-                                                random_state=0,
-                                        ),
-                                        initial_strategy='most_frequent', random_state=random_state)
-        X = pd.DataFrame(iterative_imputer.fit_transform(X), columns=X.columns, copy=True)
-    else:
-        raise ValueError("Imputation method not found")
-    logger.info(f"Length after Imputation: {len(X)}")
-
-    X = X[selected_features]
-
-    if args.one_hot:
-        if subset == "tnm":
-            X = pd.get_dummies(X, columns=["geschl", "histo_gr", "tnm_t", "tnm_n", "tnm_m"])
-        else:
-            X = pd.get_dummies(X, columns=["geschl", "histo_gr", "uicc"])
+    
         
 
     # Select Features for training
     
     # Split between Test and Training for Hyperparameter Tuning
     X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=42, test_size=0.1)
-
+    if not args.imputation_before:
+        X_test = imputation(X_test, imputation_features=imputation_features, selected_features=selected_features, imputation_method=args.imputation_method, one_hot=args.one_hot,
+                            logger=logger, random_state=random_state)
 
     # create k folds and save them
     kfold = KFold(n_splits=5, shuffle=True, random_state=random_state)
@@ -192,8 +193,13 @@ if __name__ == "__main__":
         
         scores = []
         for train_fold, _ in kfold.split(X_train, y_train):
-            model = RandomSurvivalForest(**params, random_state=random_state, n_jobs=32)
-            model.fit(X_train.iloc[train_fold], y_train[train_fold])
+            model = RandomSurvivalForest(**params, random_state=random_state, n_jobs=8)
+            if not args.imputation_before:
+                X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
+                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
+            else:
+                X_train_fold = X_train.iloc[train_fold]
+            model.fit(X_train_fold, y_train[train_fold])
             scores.append(model.score(X_test, y_test))
         trial_nr = trial.number
         
@@ -216,7 +222,12 @@ if __name__ == "__main__":
         scores = []
         for train_fold, _ in kfold.split(X_train, y_train):
             model = CoxPHSurvivalAnalysis(**params)
-            model.fit(X_train.iloc[train_fold], y_train[train_fold])
+            if not args.imputation_before:
+                X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
+                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
+            else:
+                X_train_fold = X_train.iloc[train_fold]
+            model.fit(X_train_fold, y_train[train_fold])
             scores.append(model.score(X_test, y_test))
         trial_nr = trial.number
         logger.info(f"Trial {trial_nr}: {scores}")
@@ -240,7 +251,12 @@ if __name__ == "__main__":
         scores = []
         dataset_test = torch.Tensor(X_test.values)
         for foldnr, (train_fold, _) in enumerate(kfold.split(X_train, y_train)):
-            dataset_train = tumorDataset(X_train.iloc[train_fold], y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
+            if not args.imputation_before:
+                X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
+                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
+            else:
+                X_train_fold = X_train.iloc[train_fold]
+            dataset_train = tumorDataset(X_train_fold, y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
             model, losses, test_eval = train_model(dataset_train, params, trial=trial)
             model.eval()
             y_pred = model(dataset_test.to(params["device"])).detach().cpu().numpy()
@@ -273,7 +289,16 @@ if __name__ == "__main__":
         scores= []
         for foldnr, (train_fold, _) in enumerate(kfold.split(X_train, y_train)):
             y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) #np.expand_dims(y_train["vit_status"][train_fold],1) # 
-            cat_dims = [len(pd.unique(X_train[feature])) for feature in selected_features if feature != "alter"]
+            if not args.imputation_before:
+                X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
+                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
+            else:
+                X_train_fold = X_train.iloc[train_fold]
+
+            if args.dataset == "vonko":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "alter"]
+            elif args.dataset == "aicare":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "Alter_bei_Diagnose"]
             
             cat_idxs = [0,2,3]
             if subset == "tnm":
@@ -281,10 +306,11 @@ if __name__ == "__main__":
             tabnet = TabNetSurvivalRegressor(seed=random_state, device_name=config["device"], 
                                      n_a=params["n_d"], cat_idxs=cat_idxs, 
                                      cat_dims=cat_dims, **params)
+            
             tabnet.fit(
-                X_train.iloc[train_fold].values, y_train_numpy,
+                X_train_fold.values, y_train_numpy,
                 loss_fn=loss_fn,
-                max_epochs=50
+                max_epochs=100
             )
             
             with torch.no_grad():
@@ -315,37 +341,46 @@ if __name__ == "__main__":
             "device": config["device"],
             "model": dsmodel,
             "epochs": 300,
-            "input_dim": len(X.columns),
+            "input_dim": len(selected_features),
             "loss_fn" : loss_fn
         }
         study.optimize(lambda trial: objective_deep_surv(trial, stable_params), n_trials=50, n_jobs=2)
     elif model == "tabnet":
-        study.optimize(objective_tabnet, n_trials=50, n_jobs=4)
+        study.optimize(objective_tabnet, n_trials=50, n_jobs=1)
 
     best_params = study.best_trial.params
     logger.info("RESULTS")
     logger.info(f"Best params: {best_params}")
     logger.info(f"Best value: {study.best_value}")
     logger.info("Evaluating best model on test set")
-    for i, (train_fold , test_fold) in enumerate(kfold.split(X_train, y_train)):
+    for i, (train_fold , val_fold) in enumerate(kfold.split(X_train, y_train)):
+        if not args.imputation_before:
+            X_train_fold = imputation(X_train.iloc[train_fold],imputation_features=imputation_features, selected_features=selected_features,
+                                            one_hot=args.one_hot, imputation_method=args.imputation_method, logger=logger, random_state=random_state)
+            X_val_fold = imputation(X_train.iloc[val_fold], imputation_features=imputation_features, selected_features=selected_features,
+                                        imputation_method=args.imputation_method, one_hot=args.one_hot,
+                                        logger=logger, random_state=random_state)
+        else:
+            X_train_fold = X_train.iloc[train_fold]
+            X_val_fold = X_train.iloc[val_fold]
         if model == "rsf":
             best_model = RandomSurvivalForest(**best_params, random_state=random_state, n_jobs=32)
-            best_model.fit(X_train.iloc[train_fold], y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold], y_train[train_fold],
-                                                    y_train[test_fold])
-            pickle.dump(best_model, open(f"{base_path}/{study_name}/model_{i}.pkl", "wb"))
+            best_model.fit(X_train_fold, y_train[train_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
+                                                    y_train[val_fold])
+            pickle.dump(best_model, open(f"{base_path}/results/{study_name}/model_{i}.pkl", "wb"))
         elif model == "cox":
             best_model = CoxPHSurvivalAnalysis(**best_params)
-            best_model.fit(X_train.iloc[train_fold], y_train[train_fold])
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold], y_train[train_fold],
-                                                    y_train[test_fold])
+            best_model.fit(X_train_fold, y_train[train_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold, y_train[train_fold],
+                                                    y_train[val_fold])
         elif model == "deep_surv":
-            dataset_train = tumorDataset(X_train.iloc[train_fold], y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
+            dataset_train = tumorDataset(X_train_fold, y_train["vit_status"][train_fold], y_train["survival_time"][train_fold])
             best_model, losses, test_eval = train_model(dataset_train, {**stable_params, **best_params})
             best_model.eval()
-            y_pred = best_model(torch.Tensor(X_train.iloc[test_fold].values).to(stable_params["device"])).detach().cpu().numpy()
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
-                                                        y_train[test_fold])
+            y_pred = best_model(torch.Tensor(X_val_fold.values).to(stable_params["device"])).detach().cpu().numpy()
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
+                                                        y_train[val_fold])
         elif model == "tabnet":
             optimizer_params = {
                 "lr": best_params["lr"],
@@ -355,7 +390,10 @@ if __name__ == "__main__":
             best_params_subset = best_params.copy()
             best_params_subset.pop("lr")
             best_params_subset.pop("weight_decay")
-            cat_dims = [len(pd.unique(X_train[feature])) for feature in selected_features if feature != "alter"]
+            if args.dataset == "vonko":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "alter"]
+            elif args.dataset == "aicare":
+                cat_dims = [len(pd.unique(X[feature])) for feature in selected_features if feature != "Alter_bei_Diagnose"]
 
             cat_idxs = [0,2,3]
             if subset == "tnm":
@@ -365,14 +403,24 @@ if __name__ == "__main__":
                                          n_a=best_params["n_d"], **best_params_subset)
             y_train_numpy = np.stack((y_train["vit_status"][train_fold], y_train["survival_time"][train_fold]), axis=-1) #np.expand_dims(y_train["vit_status"][train_fold],1) 
             best_model.fit(
-                X_train.iloc[train_fold].values, y_train_numpy,
+                X_train_fold.values, y_train_numpy,
                 loss_fn=loss_fn
             )
-            scores = evaluation.evaluate_survival_model(best_model, X_train.iloc[test_fold].values, y_train[train_fold],
-                                                        y_train[test_fold])
+            scores = evaluation.evaluate_survival_model(best_model, X_val_fold.values, y_train[train_fold],
+                                                        y_train[val_fold])
         logger.info(f"Fold {i}:")
         logger.info(scores)
-        Path(f"{base_path}/results/{study_name}/parameters_study_{model}_{args.loss}.yaml").write_text(yaml.dump(best_params))
+        hyperparameter_path = f"{base_path}/results/{study_name}/parameters_study_{model}"
+        if args.dataset == "aicare":
+            hyperparameter_path += f"_registry{config['registry']}"
+            hyperparameter_path += f"_entity_{config['entity']}"
+        if model=="deep_surv":
+            hyperparameter_path += f"_{dsmodel}_{args.loss}.yaml"
+        elif model=="tabnet":
+            hyperparameter_path += f"_{args.loss}.yaml"
+        else:
+            hyperparameter_path += ".yaml"
+        Path(hyperparameter_path).write_text(yaml.dump(best_params))
 
         
         

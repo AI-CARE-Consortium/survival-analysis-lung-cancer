@@ -8,7 +8,7 @@ from scipy.stats import norm
 from sksurv.nonparametric import kaplan_meier_estimator
 from pytorch_tabnet.tab_model import TabNetRegressor
 from pytorch_tabnet.abstract_model import TabModel
-
+import pandas as pd
 
 def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
     """
@@ -20,8 +20,11 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
     """
 
 
-    times = np.unique(np.quantile(y_train_numpy['survival_time'][y_train_numpy['vit_status'] == 1], np.linspace(0.1, 1, 20)))
-    
+    times = np.unique(np.quantile(y_train_numpy['survival_time'][y_train_numpy['vit_status'] == 1], np.linspace(0.1, 1, 20)).astype(int))
+
+    # Remove times that are larger than the maximum survival time in the test set
+    times = times[times < int(y_test_numpy['survival_time'].max())]
+
     if isinstance(model, torch.nn.Module):
         model.eval()
         model.cpu()
@@ -32,8 +35,7 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
         y_pred = np.squeeze(model.predict(X_test))
     c_index = concordance_index_censored(y_test_numpy['vit_status'], y_test_numpy['survival_time'], y_pred)[0]
    
-    auc, mean_auc = cumulative_dynamic_auc(y_train_numpy, y_test_numpy, y_pred, times=times)
-
+   
     if isinstance(model, torch.nn.Module) or isinstance(model, TabNetRegressor) or isinstance(model, TabModel):
         # These models do not return a survival function, so we have to calculate it ourselves
         baseline_hazard_times, baseline_hazard = kaplan_meier_estimator(y_test_numpy["vit_status"], y_test_numpy["survival_time"])
@@ -53,6 +55,17 @@ def evaluate_survival_model(model, X_test, y_train_numpy, y_test_numpy) -> Dict:
             for fn in model.predict_survival_function(X_test)
         ])
         ibs = integrated_brier_score(y_train_numpy, y_test_numpy, surv_prob, times)
+    
+    #for the AUC we need the survival time to be less than the maximum survival time in the training set 
+    test_selection = np.where(y_test_numpy["survival_time"]<= y_train_numpy["survival_time"].max())
+    y_test_numpy = y_test_numpy[test_selection]
+    y_pred = y_pred[test_selection]
+    if isinstance(X_test, pd.DataFrame):
+        X_test = X_test.iloc[test_selection]
+    else:
+        X_test = X_test[test_selection]
+    times = times[times < int(y_test_numpy['survival_time'].max())]
+    auc, mean_auc = cumulative_dynamic_auc(y_train_numpy, y_test_numpy, y_pred, times=times)
 
 
     return {
