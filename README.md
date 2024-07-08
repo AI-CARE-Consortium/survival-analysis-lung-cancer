@@ -15,6 +15,9 @@
   - ```--tnm```: Use the TNM Subset instead of the UICC subset (optional)
   - ```--one-hot```: Use one-hot encoding instead of label encoding (optional)
   - ```--loss ```: Which loss function to use ("pll", "mse")
+  - ```--imputation_before```: Apply imputation before data splitting in training, test and evaluation datasets
+  - ```--dataset```: Which dataset to use (vonko, aicare)")
+
 
 - Now, your chosen model is fitted and evaluated over 50 hyperparameter search epochs
 
