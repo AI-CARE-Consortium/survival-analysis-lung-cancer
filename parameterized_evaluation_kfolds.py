@@ -73,6 +73,9 @@ if __name__ == "__main__":
     study_name=f"{args.dataset}/{subset}/missings_imputed_with_{args.imputation_method}"
     if args.one_hot:
         study_name = study_name + "_onehot"
+    
+    if args.imputation_before:
+        study_name = study_name + "_imputation_before_splitting"
     #If folder does not exist, create it
     if model == "deep_surv":
         dsmodel = args.deep_surv_model
@@ -260,8 +263,8 @@ if __name__ == "__main__":
         else:
             shaps = explainability.SHAP(best_model, X_val_fold[::5], feature_names=selected_features)
         violin = shaps.plot_violin()
-        plt.savefig(f"{path}/violin_fold_{i}_{model}.png")
+        plt.savefig(f"{path}/violin_fold_{i}_{model}.png", dpi=500)
         plt.clf()
         beeswarm = shaps.plot_beeswarm()
-        plt.savefig(f"{path}/beeswarm_fold_{i}_{model}.png")
+        plt.savefig(f"{path}/beeswarm_fold_{i}_{model}.png", dpi=500)
         plt.clf()
