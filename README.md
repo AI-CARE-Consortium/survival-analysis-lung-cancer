@@ -24,6 +24,10 @@
 - For visualization, run ```python parameterized_evaluation_kfolds.py``` afterwards with the same parameters as above
 
 # How to Cite
-A journal paper in currently in writing. In the meantime, you can cite this repository using
+Paper:
+> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., … Handels, H. (2024). Survival analysis for lung cancer patients: A comparison of Cox regression and machine learning models. International Journal of Medical Informatics, 191. https://doi.org/10.1016/j.ijmedinf.2024.105607
+
+
+Repository:
 > Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., & Handels, H. (2023). Survival Analysis for Lung Cancer Patients: A Comparison of Cox Regression and Machine Learning Models. Zenodo. https://doi.org/10.5281/zenodo.10401220 
 
