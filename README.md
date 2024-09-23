@@ -3,7 +3,7 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10401220.svg)](https://doi.org/10.5281/zenodo.10401220)
 
 
-### Authors: Sebastian Germer, Christiane Rudolph, Louisa Labohm, Alexander Katalinic, Natalie Rath, Katharina Rausch, Heinz Handels and the AI-CARE consortium
+### Authors: Sebastian Germer, Christiane Rudolph, Louisa Labohm, Alexander Katalinic, Natalie Rath, Katharina Rausch, Bernd Holleczek, Heinz Handels and the AI-CARE consortium
 
 # How to Use
 - Install required packages (Pytorch, Scikit-Surv, Scikit-Learn, Tabnet, SHAP) via conda (see enviroment.yaml)
@@ -25,9 +25,9 @@
 
 # How to Cite
 Paper:
-> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., … Handels, H. (2024). Survival analysis for lung cancer patients: A comparison of Cox regression and machine learning models. International Journal of Medical Informatics, 191. https://doi.org/10.1016/j.ijmedinf.2024.105607
+> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., Holleczek, B., the AI-CARE Working Group & Handels, H. (2024). Survival analysis for lung cancer patients: A comparison of Cox regression and machine learning models. International Journal of Medical Informatics, 191. https://doi.org/10.1016/j.ijmedinf.2024.105607
 
 
 Repository:
-> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., & Handels, H. (2023). Survival Analysis for Lung Cancer Patients: A Comparison of Cox Regression and Machine Learning Models. Zenodo. https://doi.org/10.5281/zenodo.10401220 
+> Germer, S., Rudolph, C., Labohm, L., Katalinic, A., Rath, N., Rausch, K., Holleczek, B. & Handels, H. (2024). Survival Analysis for Lung Cancer Patients: A Comparison of Cox Regression and Machine Learning Models. Zenodo. https://doi.org/10.5281/zenodo.10401220 
 
